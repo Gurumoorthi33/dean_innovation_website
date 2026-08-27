@@ -1137,63 +1137,71 @@ function countBy(rows,field,keys){
 }
 
 /* ── DONUT CHART ────────────────────────────────────────────── */
-const DONUT_GAP = 2; // degrees gap between segments
-
 function donutChart(container, legendContainer, counts, order, labelMap, colorMap, opts={}){
   const size=opts.size||200, thickness=opts.thickness||24;
   const r=(size-thickness)/2, cx=size/2, cy=size/2;
   const circumference=2*Math.PI*r;
   const keys=order.filter(k=>(counts[k]||0)>0);
   const total=keys.reduce((s,k)=>s+counts[k],0);
-  if(total===0){ container.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--ink-4);font-size:12px;">No data</div>'; return {total:0,segs:[]}; }
+  if(total===0){
+    container.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--ink-4);font-size:12px;">No data</div>';
+    return {total:0,segs:[]};
+  }
 
-  const gapRad=(DONUT_GAP*Math.PI/180);
-  const totalGap=gapRad*keys.length;
-  const usableCirc=circumference-totalGap*r;
+  /*
+   * Standard SVG donut-chart technique using stroke-dasharray + stroke-dashoffset:
+   *
+   * Each segment is a full circle with:
+   *   stroke-dasharray  = [arcLength, circumference - arcLength]
+   *   stroke-dashoffset = -cumulativeArcLengthOfPreviousSegments + circumference/4
+   *
+   * The +circumference/4 shift rotates the start point to 12 o'clock (top).
+   * All circles share the same cx/cy/r — layering handles overlap.
+   * No SVG rotation transform needed; everything is pure offset arithmetic.
+   *
+   * Gap between segments: subtract a small fixed pixel gap from each arcLength
+   * so they don't touch, producing the "separated arc" look.
+   */
+  const GAP_PX = keys.length > 1 ? Math.min(3, circumference * 0.008) : 0; // small gap in stroke units
 
-  let cumAngle=-Math.PI/2;
-  const segs=keys.map(k=>{
-    const val=counts[k];
-    const frac=val/total;
-    const arcLen=frac*usableCirc;
-    const gapLen=gapRad*r;
-    const seg={key:k,val,pct:(frac*100).toFixed(1),color:colorMap[k],label:labelMap[k],
-               dashArr:`${arcLen} ${circumference-arcLen}`,
-               dashOff:-(cumAngle/(2*Math.PI)*circumference)-r*Math.PI/2};
-    // use stroke-dashoffset trick: rotate by cumAngle
-    const startAngle=cumAngle;
-    cumAngle+=frac*2*Math.PI*(usableCirc/circumference)+gapRad;
-    seg.startAngle=startAngle;
+  // Build segments
+  let cumLen = 0;
+  const segs = keys.map(k => {
+    const val   = counts[k];
+    const frac  = val / total;
+    const arc   = frac * circumference - GAP_PX; // visible arc length
+    const offset = circumference / 4 - cumLen;    // offset so first seg starts at top
+    const seg   = {
+      key   : k,
+      val   : val,
+      pct   : (frac * 100).toFixed(1),
+      color : colorMap[k],
+      label : labelMap[k],
+      arc   : Math.max(arc, 0),
+      offset: offset,
+    };
+    cumLen += frac * circumference; // advance by full fraction (gap comes from smaller arc, not offset)
     return seg;
   });
 
-  // Recalc using standard dashoffset approach
-  let cumLen=0;
-  segs.forEach(s=>{
-    const arcLen=parseFloat(s.dashArr);
-    s.finalDash=arcLen;
-    s.finalOffset=-(cumLen-(circumference/4));
-    cumLen+=arcLen+DONUT_GAP*(r*2*Math.PI/360);
-  });
+  const topSeg = segs.slice().sort((a,b) => b.val - a.val)[0];
 
-  const topSeg=segs.slice().sort((a,b)=>b.val-a.val)[0];
-
-  let svg=`<svg viewBox="0 0 ${size} ${size}" class="donut-svg" role="img" aria-label="Chart">`;
-  svg+=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--bg-3)" stroke-width="${thickness}"></circle>`;
-  svg+=`<g>`;
-  segs.forEach((s,i)=>{
-    svg+=`<circle class="donut-seg" tabindex="0" role="button"
+  // Build SVG — start each segment with dasharray "0 circumference" so we can animate to real value
+  let svg = `<svg viewBox="0 0 ${size} ${size}" class="donut-svg" role="img" aria-label="Donut chart">`;
+  // Track ring
+  svg += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--bg-3)" stroke-width="${thickness}"></circle>`;
+  segs.forEach((s, i) => {
+    svg += `<circle class="donut-seg" tabindex="0" role="button"
       aria-label="${s.label}: ${s.pct}%, ${fmt(s.val)} responses"
       data-key="${s.key}" data-idx="${i}"
-      cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${s.color}"
-      stroke-width="${thickness}" stroke-linecap="round"
+      cx="${cx}" cy="${cy}" r="${r}" fill="none"
+      stroke="${s.color}" stroke-width="${thickness}" stroke-linecap="butt"
       stroke-dasharray="0 ${circumference}"
-      stroke-dashoffset="${s.finalOffset}"
-      transform="rotate(-90 ${cx} ${cy})"></circle>`;
+      stroke-dashoffset="${s.offset}"></circle>`;
   });
-  svg+=`</g></svg>`;
+  svg += `</svg>`;
 
-  container.innerHTML=`<div style="position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center;">
+  container.innerHTML = `<div style="position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center;">
     ${svg}
     <div class="donut-center">
       <div class="dc-num">${topSeg.pct}%</div>
@@ -1201,62 +1209,59 @@ function donutChart(container, legendContainer, counts, order, labelMap, colorMa
     </div>
   </div>`;
 
-  // Animate in
-  requestAnimationFrame(()=>requestAnimationFrame(()=>{
-    container.querySelectorAll('.donut-seg').forEach((el,i)=>{
-      const s=segs[i];
-      el.style.transition=`stroke-dasharray .7s cubic-bezier(.22,1,.36,1) ${i*60}ms`;
-      el.setAttribute('stroke-dasharray',`${s.finalDash} ${circumference-s.finalDash}`);
+  // Animate: transition dasharray from 0 → real arc length, staggered
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    container.querySelectorAll('.donut-seg').forEach((el, i) => {
+      const s = segs[i];
+      el.style.transition = reducedMotion
+        ? 'none'
+        : `stroke-dasharray .7s cubic-bezier(.22,1,.36,1) ${i * 60}ms`;
+      el.setAttribute('stroke-dasharray', `${s.arc} ${circumference - s.arc}`);
     });
   }));
 
-  // Hover: dim others, scale hovered
-  const allSegs=()=>container.querySelectorAll('.donut-seg');
-  container.querySelectorAll('.donut-seg').forEach((el,i)=>{
-    const s=segs[i];
-    function onEnter(e){
-      allSegs().forEach((seg,j)=>{ seg.classList.toggle('dimmed',j!==i); seg.classList.toggle('hovered',j===i); });
-      showTip(e,`<b>${s.label}</b> — ${fmt(s.val)} (${s.pct}%) · click to drill down`);
-    }
-    el.addEventListener('mouseenter',onEnter);
-    el.addEventListener('mousemove',moveTip);
-    el.addEventListener('mouseleave',()=>{ allSegs().forEach(seg=>{ seg.classList.remove('dimmed','hovered'); }); hideTip(); });
-    if(opts.onClick){
-      el.addEventListener('click',()=>opts.onClick(s.key));
-      el.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); opts.onClick(s.key); } });
+  // Hover: dim all others, lift hovered
+  const allSegs = () => container.querySelectorAll('.donut-seg');
+  container.querySelectorAll('.donut-seg').forEach((el, i) => {
+    const s = segs[i];
+    const onEnter = e => {
+      allSegs().forEach((seg, j) => {
+        seg.classList.toggle('dimmed',  j !== i);
+        seg.classList.toggle('hovered', j === i);
+      });
+      showTip(e, `<b>${s.label}</b> — ${fmt(s.val)} (${s.pct}%) · click to drill down`);
+    };
+    el.addEventListener('mouseenter', onEnter);
+    el.addEventListener('mousemove',  moveTip);
+    el.addEventListener('mouseleave', () => {
+      allSegs().forEach(seg => seg.classList.remove('dimmed', 'hovered'));
+      hideTip();
+    });
+    if (opts.onClick) {
+      el.addEventListener('click',   () => opts.onClick(s.key));
+      el.addEventListener('keydown', e => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); opts.onClick(s.key); } });
     }
   });
 
-  if(legendContainer){
-    legendContainer.innerHTML=segs.map((s,i)=>`<div class="li" tabindex="0" role="button" data-idx="${i}" aria-label="${s.label}: ${s.pct}%"><span class="dot" style="background:${s.color}"></span>${s.label}&nbsp;<span class="mono" style="color:var(--ink-4)">${s.pct}%</span></div>`).join('');
-    legendContainer.querySelectorAll('.li').forEach((el,i)=>{
-      const s=segs[i];
-      el.addEventListener('mouseenter',e=>showTip(e,`<b>${s.label}</b> — ${fmt(s.val)} (${s.pct}%)`));
-      el.addEventListener('mousemove',moveTip);
-      el.addEventListener('mouseleave',hideTip);
-      if(opts.onClick){
-        el.addEventListener('click',()=>opts.onClick(s.key));
-        el.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); opts.onClick(s.key); } });
+  if (legendContainer) {
+    legendContainer.innerHTML = segs.map((s, i) =>
+      `<div class="li" tabindex="0" role="button" data-idx="${i}" aria-label="${s.label}: ${s.pct}%">
+        <span class="dot" style="background:${s.color}"></span>
+        ${s.label}&nbsp;<span class="mono" style="color:var(--ink-4)">${s.pct}%</span>
+      </div>`
+    ).join('');
+    legendContainer.querySelectorAll('.li').forEach((el, i) => {
+      const s = segs[i];
+      el.addEventListener('mouseenter', e => showTip(e, `<b>${s.label}</b> — ${fmt(s.val)} (${s.pct}%)`));
+      el.addEventListener('mousemove',  moveTip);
+      el.addEventListener('mouseleave', hideTip);
+      if (opts.onClick) {
+        el.addEventListener('click',   () => opts.onClick(s.key));
+        el.addEventListener('keydown', e => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); opts.onClick(s.key); } });
       }
     });
   }
-  return {total,segs};
-}
-
-/* Tween existing donut to new counts using RAF interpolation */
-const _donutState={};
-function donutChartTween(id, container, legendContainer, fromCounts, toCounts, order, labelMap, colorMap, opts={}){
-  // Just re-render for simplicity when no previous state
-  if(!_donutState[id]){ _donutState[id]=true; return donutChart(container,legendContainer,toCounts,order,labelMap,colorMap,opts); }
-  // Tween via RAF
-  const size=opts.size||200, thickness=opts.thickness||24;
-  const r=(size-thickness)/2, circumference=2*Math.PI*r;
-  const keys=order.filter(k=>(toCounts[k]||0)>0||(fromCounts[k]||0)>0);
-  const toTotal=keys.reduce((s,k)=>s+(toCounts[k]||0),0);
-  if(toTotal===0) return donutChart(container,legendContainer,toCounts,order,labelMap,colorMap,opts);
-
-  // Re-render at target, with CSS transition handling the visual tween
-  return donutChart(container,legendContainer,toCounts,order,labelMap,colorMap,opts);
+  return {total, segs};
 }
 
 /* ── HBAR CHART ─────────────────────────────────────────────── */
